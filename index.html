@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simple Audio Recorder</title>
+<style>
+  :root { color-scheme: dark; --bg:#10131a; --panel:#191f2b; --line:#30394a; --text:#f3f5f8; --muted:#aab4c4; --accent:#8be0c0; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; background:radial-gradient(circle at top,#1d3035,#10131a 55%); color:var(--text); font:16px/1.5 system-ui,Segoe UI,sans-serif; }
+  main { width:min(680px,100%); background:var(--panel); border:1px solid var(--line); border-radius:24px; padding:clamp(22px,5vw,40px); box-shadow:0 24px 70px #0005; }
+  .eyebrow { color:var(--accent); text-transform:uppercase; letter-spacing:.16em; font-size:11px; font-weight:800; }
+  h1 { margin:8px 0; font-size:clamp(28px,5vw,42px); letter-spacing:-.04em; }
+  p { color:var(--muted); margin:0 0 22px; }
+  .status { display:flex; align-items:center; gap:9px; color:var(--muted); font-size:14px; margin:18px 0; }
+  .dot { width:10px;height:10px;border-radius:50%;background:#788396; }
+  .dot.live { background:#ff6678; box-shadow:0 0 0 5px #ff66781c; animation:pulse 1.5s infinite; }
+  @keyframes pulse { 50% { box-shadow:0 0 0 9px #ff667808; } }
+  .timer { font-size:clamp(34px,7vw,54px); font-weight:750; letter-spacing:.04em; font-variant-numeric:tabular-nums; margin:16px 0 24px; }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; }
+  button, select { border:1px solid var(--line); border-radius:12px; padding:12px 17px; font:inherit; font-weight:700; }
+  button { cursor:pointer; background:var(--accent); color:#10211c; }
+  button.secondary { background:#293242; color:var(--text); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .option { margin:18px 0; padding:14px; border:1px solid var(--line); border-radius:14px; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  .option strong { display:block; }
+  .option small { display:block; color:var(--muted); margin-top:3px; }
+  input[type=checkbox] { width:21px; height:21px; accent-color:#54d5a5; }
+  .recordings { margin-top:28px; border-top:1px solid var(--line); padding-top:20px; }
+  .recordings h2 { font-size:16px; margin:0 0 12px; }
+  .recording { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; border:1px solid var(--line); border-radius:12px; padding:12px; margin:8px 0; }
+  .recording audio { width:100%; max-width:100%; }
+  .recording a { color:var(--accent); }
+  .note { margin-top:18px; font-size:12px; color:var(--muted); }
+  #meter { display:flex; gap:4px; align-items:center; height:30px; margin-bottom:12px; }
+  #meter span { display:block; width:5px; height:8px; border-radius:4px; background:#415064; transition:height .08s; }
+  #meter.active span { background:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Simple · Local · No account</div>
+  <h1>Audio Recorder</h1>
+  <p>Record microphone audio, or capture audio from a browser tab or shared screen where your browser supports it. Save recordings directly to your device.</p>
+
+  <div class="option">
+    <div><strong>Microphone</strong><small>Record sound picked up by your mic</small></div>
+    <input id="micOn" type="checkbox" checked aria-label="Enable microphone recording">
+  </div>
+  <div class="option">
+    <div><strong>Browser / computer audio</strong><small>Choose a tab or screen and enable audio sharing</small></div>
+    <input id="systemOn" type="checkbox" aria-label="Enable browser or computer audio">
+  </div>
+
+  <div class="status"><span class="dot" id="dot"></span><span id="status">Ready to record</span></div>
+  <div id="meter" aria-label="Audio activity meter"></div>
+  <div class="timer" id="timer">00:00:00</div>
+  <div class="controls">
+    <button id="start">● Start recording</button>
+    <button id="stop" class="secondary" disabled>■ Stop</button>
+  </div>
+
+  <section class="recordings">
+    <h2>Recordings in this session</h2>
+    <div id="recordings"><p>No recordings yet. Your saved files will appear here.</p></div>
+  </section>
+  <div class="note">Browser limitation: microphone recording is widely supported. System/tab audio depends on browser support and what you select in the sharing dialogue. This page cannot silently record all computer audio. Keep this page open while recording, and get consent before recording other people.</div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let streams = [], contexts = [], recorders = [], chunks = [];
+let startTime = 0, timerHandle = null, running = false;
+const bars = [];
+for (let i=0;i<38;i++){ const b=document.createElement('span'); $('meter').appendChild(b); bars.push(b); }
+
+function fmt(ms) {
+  const sec = Math.floor(ms/1000), h = Math.floor(sec/3600), m = Math.floor(sec%3600/60), s = sec%60;
+  return [h,m,s].map(n=>String(n).padStart(2,'0')).join(':');
+}
+function setStatus(text, live=false) {
+  $('status').textContent=text;
+  $('dot').classList.toggle('live',live);
+  $('meter').classList.toggle('active',live);
+}
+function visualise(stream, ctx) {
+  const analyser=ctx.createAnalyser(); analyser.fftSize=128;
+  const source=ctx.createMediaStreamSource(stream); source.connect(analyser);
+  const data=new Uint8Array(analyser.frequencyBinCount);
+  const draw=()=>{
+    if(!running) return;
+    analyser.getByteFrequencyData(data);
+    bars.forEach((bar,i)=>bar.style.height=(4+(data[i%data.length]/255)*25)+'px');
+    requestAnimationFrame(draw);
+  };
+  draw();
+}
+function addRecording(blob, type, index) {
+  const url=URL.createObjectURL(blob);
+  const stamp=new Date().toLocaleString();
+  const ext = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('ogg') ? 'ogg' : 'webm';
+  const item=document.createElement('div'); item.className='recording';
+  const label=document.createElement('div'); label.textContent=`${type} · ${stamp}`;
+  const download=document.createElement('a'); download.href=url; download.download=`recording_${type.toLowerCase().replaceAll(' ','_')}_${Date.now()}.${ext}`; download.textContent='Download';
+  const audio=document.createElement('audio'); audio.controls=true; audio.src=url;
+  item.append(label,download,audio); $('recordings').prepend(item);
+}
+function startRecorder(stream, type) {
+  const mimeTypes=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus'];
+  const mimeType=mimeTypes.find(t=>MediaRecorder.isTypeSupported(t));
+  const options=mimeType?{mimeType}:undefined;
+  const recorder=new MediaRecorder(stream,options);
+  const parts=[];
+  recorder.ondataavailable=e=>{if(e.data && e.data.size) parts.push(e.data);};
+  recorder.onstop=()=>{if(parts.length) addRecording(new Blob(parts,{type:recorder.mimeType||'audio/webm'}),type,recorders.length);};
+  recorder.start(1000);
+  recorders.push(recorder); chunks.push(parts);
+}
+async function start() {
+  if(running) return;
+  const mic=$('micOn').checked, system=$('systemOn').checked;
+  if(!mic && !system){setStatus('Enable at least one audio source.');return;}
+  if(!navigator.mediaDevices || !window.MediaRecorder){setStatus('This browser does not support audio recording. Try current Chrome or Edge.');return;}
+  try {
+    $('start').disabled=true;
+    if(mic) {
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      streams.push(stream);
+      startRecorder(stream,'Microphone');
+      const ctx=new AudioContext(); contexts.push(ctx); visualise(stream,ctx);
+    }
+    if(system) {
+      const stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+      streams.push(stream);
+      const audioTracks=stream.getAudioTracks();
+      if(!audioTracks.length) {
+        stream.getTracks().forEach(t=>t.stop());
+        throw new Error('No shared audio detected. In the share dialogue, select a browser tab and enable Share tab audio, or enable system audio if offered.');
+      }
+      const audioOnly=new MediaStream(audioTracks);
+      startRecorder(audioOnly,'Browser or computer audio');
+      const ctx=new AudioContext(); contexts.push(ctx); visualise(audioOnly,ctx);
+      stream.getVideoTracks().forEach(t=>t.addEventListener('ended',()=>stop()));
+    }
+    running=true; startTime=Date.now();
+    $('stop').disabled=false; $('start').disabled=true;
+    setStatus('Recording… keep this page open.',true);
+    timerHandle=setInterval(()=>$('timer').textContent=fmt(Date.now()-startTime),250);
+  } catch(err) {
+    setStatus(err.message || String(err));
+    await cleanup();
+  }
+}
+async function cleanup() {
+  clearInterval(timerHandle); timerHandle=null; running=false;
+  recorders.forEach(r=>{if(r.state!=='inactive')r.stop();});
+  streams.forEach(s=>s.getTracks().forEach(t=>t.stop()));
+  for(const c of contexts){try{await c.close();}catch(e){}}
+  streams=[]; contexts=[]; recorders=[]; chunks=[];
+  $('start').disabled=false; $('stop').disabled=true;
+  bars.forEach(b=>b.style.height='8px');
+  setStatus('Recording stopped. Download your files below.');
+}
+async function stop(){ if(!running && !recorders.length)return; await cleanup(); }
+$('start').addEventListener('click',start);
+$('stop').addEventListener('click',stop);
+</script>
+</body>
+</html>
